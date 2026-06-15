@@ -69,8 +69,9 @@ def _validate_and_extract_slack_penalties(model_data):
     assert('q_load_mismatch_cost' in model_data.data['system'])
     return model_data.data['system']['load_mismatch_cost'], model_data.data['system']['q_load_mismatch_cost']
 
-
-def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', keep_vars_for_out_of_service_elements=False):
+#######################################
+def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', 
+                                keep_vars_for_out_of_service_elements=False):
     if keep_vars_for_out_of_service_elements:
         out_of_service_gens = tx_utils._get_out_of_service_gens(model_data)
         out_of_service_branches = tx_utils._get_out_of_service_branches(model_data)
@@ -99,7 +100,7 @@ def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_
 
     model = pe.ConcreteModel()
 
-    ### declare (and fix) the loads at the buses
+    ### declare (and fix) the loads at the buses 
     bus_p_loads, bus_q_loads = tx_utils.dict_of_bus_loads(buses, loads)
 
     libbus.declare_var_pl(model, bus_attrs['names'], initialize=bus_p_loads)
@@ -184,6 +185,7 @@ def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_
     pt_bounds = s_lbub
     qf_bounds = s_lbub
     qt_bounds = s_lbub
+
     pf_init = dict()
     pt_init = dict()
     qf_init = dict()
@@ -279,6 +281,7 @@ def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_
             libgen.declare_piecewise_pg_cost_cons(model=model, index_set=pw_pg_cost_gens, p_costs=p_costs)
     libgen.declare_expression_pg_operating_cost(model=model, index_set=gen_attrs['names'], p_costs=p_costs, pw_formulation=pw_cost_model)
     obj_expr = sum(model.pg_operating_cost[gen_name] for gen_name in model.pg_operating_cost)
+    
     q_costs = gen_attrs.get('q_cost', None)
     if q_costs is not None:
         pw_qg_cost_gens = list(libgen.pw_gen_generator(gen_attrs['names'], costs=q_costs))
@@ -362,7 +365,47 @@ def _create_base_power_ac_model(model_data, include_feasibility_slack=False, pw_
         model.s[from_bus, to_bus].setub(None)
 
     return model, md
+####################################### 
 
+def create_rsv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', keep_vars_for_out_of_service_elements=False):
+    model, md = _create_base_power_ac_model(model_data, include_feasibility_slack=include_feasibility_slack,
+                                            pw_cost_model=pw_cost_model, keep_vars_for_out_of_service_elements=keep_vars_for_out_of_service_elements)
+    bus_attrs = md.attributes(element_type='bus')
+    unique_bus_pairs = tx_utils.get_unique_bus_pairs(md)
+
+    # declare the rectangular voltages
+    neg_v_max = map_items(op.neg, bus_attrs['v_max'])
+    vr_init = {k: bus_attrs['vm'][k] * pe.cos(radians(bus_attrs['va'][k])) for k in bus_attrs['vm']}
+    libbus.declare_var_vr(model, bus_attrs['names'], initialize=vr_init,
+                          bounds=zip_items(neg_v_max, bus_attrs['v_max'])
+                          )
+
+    vj_init = {k: bus_attrs['vm'][k] * pe.sin(radians(bus_attrs['va'][k])) for k in bus_attrs['vm']}
+    libbus.declare_var_vj(model, bus_attrs['names'], initialize=vj_init,
+                          bounds=zip_items(neg_v_max, bus_attrs['v_max'])
+                          )
+
+    # fix the reference bus
+    ref_bus = md.data['system']['reference_bus']
+    ref_angle = md.data['system']['reference_bus_angle']
+    if ref_angle != 0.0:
+        libbus.declare_eq_ref_bus_nonzero(model, ref_angle, ref_bus)
+    else:
+        model.vj[ref_bus].fix(0.0)
+        model.vr[ref_bus].setlb(bus_attrs['v_min'][ref_bus])
+
+    # relate c, s, and vmsq to vm and va
+    libbus.declare_eq_vmsq(model=model,
+                           index_set=bus_attrs['names'],
+                           coordinate_type=CoordinateType.RECTANGULAR)
+    libbranch.declare_eq_c(model=model,
+                           index_set=unique_bus_pairs,
+                           coordinate_type=CoordinateType.RECTANGULAR)
+    libbranch.declare_eq_s(model=model,
+                           index_set=unique_bus_pairs,
+                           coordinate_type=CoordinateType.RECTANGULAR)
+
+    return model, md
 
 def create_atan_acopf_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', keep_vars_for_out_of_service_elements=False):
     model, md = _create_base_power_ac_model(model_data, include_feasibility_slack=include_feasibility_slack,
@@ -410,7 +453,6 @@ def create_atan_acopf_model(model_data, include_feasibility_slack=False, pw_cost
 
     return model, md
 
-
 def create_psv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', keep_vars_for_out_of_service_elements=False):
     model, md = _create_base_power_ac_model(model_data, include_feasibility_slack=include_feasibility_slack,
                                             pw_cost_model=pw_cost_model, keep_vars_for_out_of_service_elements=keep_vars_for_out_of_service_elements)
@@ -452,48 +494,6 @@ def create_psv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_
                            coordinate_type=CoordinateType.POLAR)
 
     return model, md
-
-
-def create_rsv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_model='delta', keep_vars_for_out_of_service_elements=False):
-    model, md = _create_base_power_ac_model(model_data, include_feasibility_slack=include_feasibility_slack,
-                                            pw_cost_model=pw_cost_model, keep_vars_for_out_of_service_elements=keep_vars_for_out_of_service_elements)
-    bus_attrs = md.attributes(element_type='bus')
-    unique_bus_pairs = tx_utils.get_unique_bus_pairs(md)
-
-    # declare the rectangular voltages
-    neg_v_max = map_items(op.neg, bus_attrs['v_max'])
-    vr_init = {k: bus_attrs['vm'][k] * pe.cos(radians(bus_attrs['va'][k])) for k in bus_attrs['vm']}
-    libbus.declare_var_vr(model, bus_attrs['names'], initialize=vr_init,
-                          bounds=zip_items(neg_v_max, bus_attrs['v_max'])
-                          )
-
-    vj_init = {k: bus_attrs['vm'][k] * pe.sin(radians(bus_attrs['va'][k])) for k in bus_attrs['vm']}
-    libbus.declare_var_vj(model, bus_attrs['names'], initialize=vj_init,
-                          bounds=zip_items(neg_v_max, bus_attrs['v_max'])
-                          )
-
-    # fix the reference bus
-    ref_bus = md.data['system']['reference_bus']
-    ref_angle = md.data['system']['reference_bus_angle']
-    if ref_angle != 0.0:
-        libbus.declare_eq_ref_bus_nonzero(model, ref_angle, ref_bus)
-    else:
-        model.vj[ref_bus].fix(0.0)
-        model.vr[ref_bus].setlb(bus_attrs['v_min'][ref_bus])
-
-    # relate c, s, and vmsq to vm and va
-    libbus.declare_eq_vmsq(model=model,
-                           index_set=bus_attrs['names'],
-                           coordinate_type=CoordinateType.RECTANGULAR)
-    libbranch.declare_eq_c(model=model,
-                           index_set=unique_bus_pairs,
-                           coordinate_type=CoordinateType.RECTANGULAR)
-    libbranch.declare_eq_s(model=model,
-                           index_set=unique_bus_pairs,
-                           coordinate_type=CoordinateType.RECTANGULAR)
-
-    return model, md
-
 
 def create_riv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_model='delta'):
     md = model_data.clone_in_service()
