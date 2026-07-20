@@ -607,7 +607,7 @@ def create_riv_acopf_model(model_data, include_feasibility_slack=False, pw_cost_
                               index_set=branch_attrs['names'],
                               initialize=ifr_init,
                               bounds=if_bounds
-                              )
+                              ) 
     libbranch.declare_var_ifj(model=model,
                               index_set=branch_attrs['names'],
                               initialize=ifj_init,
